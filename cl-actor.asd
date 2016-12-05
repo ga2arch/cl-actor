@@ -1,11 +1,13 @@
 ;;;; cl-actor.asd
 
 (asdf:defsystem #:cl-actor
-  :description "Describe cl-actor here"
-  :author "Your Name <your.name@example.com>"
-  :license "Specify license here"
+  :description "Akka like actor system"
+  :author "Gabriele Carrettoni <gabriele.carrettoni@gmail.com>"
+  :license "MIT"
   :depends-on (#:alexandria
-               #:bordeaux-threads)
+               #:bordeaux-threads
+               #:a-cl-logger
+               #:a-cl-logger)
   :serial t
   :components ((:file "package")
                (:file "cl-actor")))
