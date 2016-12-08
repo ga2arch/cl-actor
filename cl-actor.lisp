@@ -87,7 +87,7 @@
           (setf (gethash path actors) actor)))))
 
 (defmethod get-actor ((system actor-system) (ref actor-ref))
-  (with-lock-held ((lock-of system))
+  (with-recursive-lock-held ((lock-of system))
     (let* ((actors (get-actors system))
            (actor (gethash (get-path ref) actors)))
       (unless actor
@@ -120,6 +120,7 @@
                (if (queue-of actor) t nil))))
     (let ((body (body-of actor))
           (message (pop-queue)))
+      (sleep 5)
       (when message
         (funcall body message)
         (when (queue-has-elem?)
@@ -128,8 +129,9 @@
 (defmethod schedule ((system actor-system) (scheduler pool-scheduler) path (actor actor))
   (with-lock-held ((lock-of scheduler))
     (let* ((active (get-active scheduler))
-           (actor (gethash path active)))
-      (unless actor
+           (is-active (gethash path active)))
+      (unless is-active
+        (setf (gethash path active) t)
         (make-thread
          (lambda ()
            (run actor)
@@ -137,12 +139,13 @@
              (setf (gethash path active) nil))))))))
 
 (defmethod send ((system actor-system) (ref actor-ref) message)
-  (let* ((actor (get-actor system ref))
-         (queue (queue-of actor))
-         (path (get-path ref)))
-    (with-lock-held ((lock-of actor))
-      (setf (queue-of actor) (append queue (list message))))
-    (schedule system (scheduler-of actor) path actor)))
+  (with-lock-held ((lock-of system))
+    (let ((actor (get-actor system ref)))
+      (with-lock-held ((lock-of actor))
+        (let* ((queue (queue-of actor))
+               (path (get-path ref)))
+          (setf (queue-of actor) (append queue (list message)))
+          (schedule system (scheduler-of actor) path actor))))))
 
 (defmethod actor-of ((system actor-system) (actor actor) &key name)
   "Create an actor ref for the actor passed and inserts it into the system"
@@ -152,13 +155,27 @@
      (insert-actor system path actor)
      ref))
 
+(defparameter *stdout* *standard-output*)
 (defparameter *system* (make-system))
 (defparameter *pool* (make-pool-scheduler 10))
 
-(defparameter *actor1* (make-actor *pool* (lambda (m) (format t "Actor1: ~A" m))))
-(defparameter *actor2* (make-actor *pool* (lambda (m) (format t "Actor2: ~A" m))))
+(defparameter *actor1*
+  (make-actor *pool*
+              (lambda (m)
+                (let ((*standard-output* *stdout*))
+                  (format t "Actor1: ~A~%" (current-thread))))))
 
-(defun test ()
-  (let ((ref1 (actor-of *system* *actor1*))
-        (ref2 (actor-of *system* *actor2*)))
-    (send *system* ref1 "prova")))
+(defparameter *actor2*
+  (make-actor *pool*
+              (lambda (m)
+                (let ((*standard-output* *stdout*))
+                  (format t "Actor2: ~A" m)))))
+
+(defparameter *ref1* (actor-of *system* *actor1*))
+(send *system* *ref1* "prova")
+(defparameter *ref2* (actor-of *system* *actor2*))
+(send *system* *ref2* "prova2")
+
+(make-thread (lambda ()
+				  (let ((*standard-output* *stdout*))
+				    (format t "hello~%"))))
