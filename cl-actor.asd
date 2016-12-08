@@ -6,7 +6,6 @@
   :license "MIT"
   :depends-on (#:alexandria
                #:bordeaux-threads
-               #:a-cl-logger
                #:a-cl-logger)
   :serial t
   :components ((:file "package")

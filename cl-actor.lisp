@@ -175,7 +175,3 @@
 (send *system* *ref1* "prova")
 (defparameter *ref2* (actor-of *system* *actor2*))
 (send *system* *ref2* "prova2")
-
-(make-thread (lambda ()
-				  (let ((*standard-output* *stdout*))
-				    (format t "hello~%"))))
