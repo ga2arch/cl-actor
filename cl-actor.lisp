@@ -37,11 +37,11 @@
    (scheduler :reader scheduler-of
               :initform nil
               :initarg :scheduler)
-   (body :reader body-of
-         :initarg :body)))
+   (state :accessor state-of
+          :initform (list 'default))))
 
-(defun make-actor (scheduler body)
-  (make-instance 'actor :scheduler scheduler :body body))
+(defun make-actor (scheduler)
+  (make-instance 'actor :scheduler scheduler))
 
 (defclass actor-ref ()
   ((path :reader get-path
@@ -76,6 +76,10 @@
 (defgeneric send (system ref message))
 (defgeneric schedule (system scheduler path actor))
 (defgeneric run (actor))
+
+(defgeneric become (actor state))
+(defgeneric unbecome (actor))
+(defgeneric receive (actor message state))
 
 (defmethod insert-actor ((system actor-system) path (actor actor))
   "Inserts a ref into the system throwing if it already exists"
@@ -118,13 +122,23 @@
            (queue-has-elem? ()
              (with-lock-held ((lock-of actor))
                (if (queue-of actor) t nil))))
-    (let ((body (body-of actor))
-          (message (pop-queue)))
-      (sleep 5)
+    (let ((message (pop-queue)))
       (when message
-        (funcall body message)
+        (receive actor message (car (state-of actor)))
         (when (queue-has-elem?)
           (run actor))))))
+
+(defmethod receive ((actor actor) message state)
+  (format t "actor: ~A didn't receive message ~A" actor message))
+
+(defmethod become ((actor actor) (state symbol))
+  (let ((states (state-of actor)))
+    (setf (state-of actor) (cons state states))))
+
+(defmethod unbecome ((actor actor))
+  (let ((states (state-of actor)))
+    (when states
+      (setf (state-of actor) (cdr states)))))
 
 (defmethod schedule ((system actor-system) (scheduler pool-scheduler) path (actor actor))
   (with-lock-held ((lock-of scheduler))
@@ -159,19 +173,19 @@
 (defparameter *system* (make-system))
 (defparameter *pool* (make-pool-scheduler 10))
 
-(defparameter *actor1*
-  (make-actor *pool*
-              (lambda (m)
-                (let ((*standard-output* *stdout*))
-                  (format t "Actor1: ~A~%" (current-thread))))))
+(defclass actor-1 (actor)
+  ())
 
-(defparameter *actor2*
-  (make-actor *pool*
-              (lambda (m)
-                (let ((*standard-output* *stdout*))
-                  (format t "Actor2: ~A" m)))))
+(defmethod receive ((actor actor-1) (message string) (state (eql 'default)))
+  (let ((*standard-output* *stdout*))
+    (format t "Actor1: ~A~%" message))
+  (become actor 'state1))
 
-(defparameter *ref1* (actor-of *system* *actor1*))
+(defmethod receive ((actor actor-1) (message string) (state (eql 'state1)))
+  (let ((*standard-output* *stdout*))
+    (format t "Actor1: state1 ~A~%" message))
+  (unbecome actor))
+
+(defparameter *ref1* (actor-of *system* (make-instance 'actor-1 :scheduler *pool*)))
 (send *system* *ref1* "prova")
-(defparameter *ref2* (actor-of *system* *actor2*))
-(send *system* *ref2* "prova2")
+(send *system* *ref1* 1)
