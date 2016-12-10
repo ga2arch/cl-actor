@@ -153,13 +153,12 @@
              (setf (gethash path active) nil))))))))
 
 (defmethod send ((system actor-system) (ref actor-ref) message)
-  (with-lock-held ((lock-of system))
-    (let ((actor (get-actor system ref)))
-      (with-lock-held ((lock-of actor))
-        (let* ((queue (queue-of actor))
-               (path (get-path ref)))
-          (setf (queue-of actor) (append queue (list message)))
-          (schedule system (scheduler-of actor) path actor))))))
+  (let ((actor (get-actor system ref)))
+    (with-lock-held ((lock-of actor))
+      (let* ((queue (queue-of actor))
+             (path (get-path ref)))
+        (setf (queue-of actor) (append queue (list message)))
+        (schedule system (scheduler-of actor) path actor)))))
 
 (defmethod actor-of ((system actor-system) (actor actor) &key name)
   "Create an actor ref for the actor passed and inserts it into the system"
