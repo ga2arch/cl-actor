@@ -173,18 +173,30 @@
 (defparameter *system* (make-system))
 (defparameter *pool* (make-pool-scheduler 10))
 
-(defclass actor-1 (actor)
-  ())
+(defmacro defactor (name &body body)
+  `(macrolet ((receive (message state &body body)
+                `(defmethod receive ((this ,',name) ,message (state (eql ,state)))
+                   (flet ((become (state)
+                            (become this state))
+                          (unbecome ()
+                            (unbecome this)))
+                     ,@body))))
+     (progn
+       (defclass ,name (actor)
+         ())
+       ,@body)))
 
-(defmethod receive ((actor actor-1) (message string) (state (eql 'default)))
-  (let ((*standard-output* *stdout*))
-    (format t "Actor1: ~A~%" message))
-  (become actor 'state1))
+(defactor actor-1
 
-(defmethod receive ((actor actor-1) (message string) (state (eql 'state1)))
-  (let ((*standard-output* *stdout*))
-    (format t "Actor1: state1 ~A~%" message))
-  (unbecome actor))
+  (receive (message string) 'default
+           (let ((*standard-output* *stdout*))
+             (format t "Actor2: ~A~%" message))
+           (become 'state1))
+
+  (receive (message number) 'state1
+           (let ((*standard-output* *stdout*))
+             (format t "Actor2: state1 ~A~%" message)
+             (unbecome))))
 
 (defparameter *ref1* (actor-of *system* (make-instance 'actor-1 :scheduler *pool*)))
 (send *system* *ref1* "prova")
