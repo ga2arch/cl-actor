@@ -91,6 +91,7 @@
           (setf (gethash path actors) actor)))))
 
 (defmethod get-actor ((system actor-system) (ref actor-ref))
+  "Returns the actor associated with the ref"
   (with-recursive-lock-held ((lock-of system))
     (let* ((actors (get-actors system))
            (actor (gethash (get-path ref) actors)))
@@ -99,6 +100,7 @@
       actor)))
 
 (defun random-string (length)
+  "Generates a random string of length"
   (let ((chars "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"))
     (coerce (loop repeat length collect (aref chars (random (length chars))))
             'string)))
@@ -112,6 +114,7 @@
       (format nil "/~A" name)))
 
 (defmethod run ((actor actor))
+  "Run the actor, extracting a message from its own queue and processing it"
   (labels ((pop-queue ()
              (with-lock-held ((lock-of actor))
                (let ((queue (queue-of actor)))
@@ -129,18 +132,22 @@
           (run actor))))))
 
 (defmethod receive ((actor actor) message state)
+  "Dead lettering"
   (format t "actor: ~A didn't receive message ~A" actor message))
 
 (defmethod become ((actor actor) (state symbol))
+  "Push a new state on the stack"
   (let ((states (state-of actor)))
     (setf (state-of actor) (cons state states))))
 
 (defmethod unbecome ((actor actor))
+  "Pops the state of the actor if the state size is > 1"
   (let ((states (state-of actor)))
-    (when states
+    (when (> (length states) 1)
       (setf (state-of actor) (cdr states)))))
 
 (defmethod schedule ((system actor-system) (scheduler pool-scheduler) path (actor actor))
+  "Schedule the run of the actor on the scheduler"
   (with-lock-held ((lock-of scheduler))
     (let* ((active (get-active scheduler))
            (is-active (gethash path active)))
@@ -153,6 +160,7 @@
              (setf (gethash path active) nil))))))))
 
 (defmethod send ((system actor-system) (ref actor-ref) message)
+  "Send the message to the actor referred by the ref"
   (let ((actor (get-actor system ref)))
     (with-lock-held ((lock-of actor))
       (let* ((queue (queue-of actor))
@@ -173,6 +181,8 @@
 (defparameter *pool* (make-pool-scheduler 10))
 
 (defmacro defactor (name &body body)
+  "Defines a new actor, providing a better primitives for defining
+receive and state changing"
   `(macrolet ((receive (message state &body body)
                 `(defmethod receive ((this ,',name) ,message (state (eql ,state)))
                    (flet ((become (state)
@@ -186,15 +196,14 @@
        ,@body)))
 
 (defactor actor-1
-
   (receive (message string) 'default
            (let ((*standard-output* *stdout*))
-             (format t "Actor2: ~A~%" message))
+             (format t "Actor1: ~A~%" message))
            (become 'state1))
 
   (receive (message number) 'state1
            (let ((*standard-output* *stdout*))
-             (format t "Actor2: state1 ~A~%" message)
+             (format t "Actor1: state1 ~A~%" message)
              (unbecome))))
 
 (defparameter *ref1* (actor-of *system* (make-instance 'actor-1 :scheduler *pool*)))
