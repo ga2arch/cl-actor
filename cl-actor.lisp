@@ -193,37 +193,66 @@
     (add-actor system path actor)
     ref))
 
+(defun extract-keys (args)
+  (let ((body args)
+        (vars)
+        (scheduler)
+        (on-start)
+        (on-stop))
+    (loop
+       (unless (and body (cdr body)) (return))
+       (print (car body))
+       (case (car body)
+         ((:vars)
+          (setf vars (cadr body)))
+         ((:scheduler)
+          (setf scheduler (cadr body)))
+         ((:on-start)
+          (setf on-start (cadr body)))
+         ((:on-stop)
+          (setf on-stop (cadr body)))
+         (otherwise (return)))
+       (setf body (cddr body)))
+    (list vars scheduler on-start on-stop body)))
+
 (defparameter *stdout* *standard-output*)
 (defparameter *system* (make-system))
 (defparameter *pool* (make-pool-scheduler 10))
 
-(defmacro defactor (name &body body)
+(defmacro defactor (name &rest args)
   "Defines a new actor, providing a better primitives for defining
 receive and state changing"
-  (let ((this (gensym))
-        (st (gensym))
-        (sd (gensym)))
-    `(macrolet ((receive (message state &body body)
-                  `(defmethod receive ((,',this ,',name)
-                                       ,message
-                                       (,',st (eql ,state))
-                                       (,',sd actor-ref))
-                     (flet ((become (state)
-                              (become ,',this state))
-                            (unbecome ()
-                              (unbecome ,',this))
-                            (get-self ()
-                              (ref-of ,',this))
-                            (get-sender ()
-                              ,',sd)
-                            (get-system ()
-                              (system-of ,',this))
-                            (send (to message from)
-                              (send (system-of ,',this) to message from)))
-                       ,@body))))
-       (progn
-         (defclass ,name (actor) ())
-         ,@body))))
+  (destructuring-bind (vars scheduler on-start on-stop body) (extract-keys args)
+    (let ((this (gensym))
+          (st (gensym))
+          (sd (gensym)))
+      `(let (,@(mapcar #'list vars))
+         (macrolet ((receive (message state &body body)
+                      `(defmethod receive ((,',this ,',name)
+                                           ,message
+                                           (,',st (eql ,state))
+                                           (,',sd actor-ref))
+                         (flet ((become (state)
+                                  (become ,',this state))
+                                (unbecome ()
+                                  (unbecome ,',this))
+                                (get-self ()
+                                  (ref-of ,',this))
+                                (get-sender ()
+                                  ,',sd)
+                                (get-system ()
+                                  (system-of ,',this))
+                                (send (to message from)
+                                  (send (system-of ,',this) to message from)))
+                           ,@body))))
+           (progn
+             (defclass ,name (actor) ())
+             (defmethod run ((actor ,name))
+               (flet ((actor-of (act)
+                        (actor-of (system-of actor) act)))
+                 ,on-start
+                 (call-next-method actor)))
+             ,@body))))))
 
 (defactor dead-letter
   (receive message 'default
@@ -238,11 +267,15 @@ receive and state changing"
              (format t "Worker: ~A~%" message))))
 
 (defactor actor-1
-  ;;  :scheduler *pool*
+  :vars (worker)
+  :on-start
+  (setf worker (actor-of (make-instance 'worker :scheduler *pool*)))
+
   (receive (message string) 'default
            (let ((*standard-output* *stdout*))
              (format t "Actor1: ~A~%" message))
            (send (get-self) 1 (get-self))
+           (send worker "lol" (get-self))
            (become 'state1))
 
   (receive (message number) 'state1
