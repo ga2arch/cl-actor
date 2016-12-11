@@ -39,20 +39,23 @@
               :initarg :scheduler)
    (state :accessor state-of
           :initform (list 'default))
-   (ref :accessor ref-of)))
+   (ref :accessor ref-of)
+   (system :accessor system-of)))
 
 (defun make-actor (scheduler)
   (make-instance 'actor :scheduler scheduler))
 
 (defclass actor-ref ()
   ((path :reader get-path
-         :initarg :path))
+         :initarg :path)
+   (system :accessor system-of
+           :initarg :system))
   (:documentation
    "Reference to the real actor through path"))
 
-(defun make-ref (path)
+(defun make-ref (system path)
   "Create the actor ref with the given path"
-  (make-instance 'actor-ref :path path))
+  (make-instance 'actor-ref :path path :system system))
 
 (defclass scheduler () ())
 (defclass pool-scheduler (scheduler)
@@ -171,11 +174,22 @@
 
 (defmethod actor-of ((system actor-system) (actor actor) &key name)
   "Create an actor ref for the actor passed and inserts it into the system"
-  (alog.debug "creating actor ~a" name)
   (let* ((path (make-path nil name))
-         (ref (make-ref path)))
+         (ref (make-ref system path)))
     (with-lock-held ((lock-of actor))
-      (setf (ref-of actor) ref))
+      (setf (ref-of actor) ref)
+      (setf (system-of actor) system))
+    (add-actor system path actor)
+    ref))
+
+(defmethod actor-of ((parent actor-ref) (actor actor) &key name)
+  "Create an actor ref for the actor passed and inserts it into the system"
+  (let* ((system (system-of parent))
+         (path (make-path (get-path parent) name))
+         (ref (make-ref system path)))
+    (with-lock-held ((lock-of actor))
+      (setf (ref-of actor) ref)
+      (setf (system-of actor) system))
     (add-actor system path actor)
     ref))
 
@@ -201,7 +215,11 @@ receive and state changing"
                             (get-self ()
                               (ref-of ,',this))
                             (get-sender ()
-                              ,',sd))
+                              ,',sd)
+                            (get-system ()
+                              (system-of ,',this))
+                            (send (to message from)
+                              (send (system-of ,',this) to message from)))
                        ,@body))))
        (progn
          (defclass ,name (actor) ())
@@ -214,11 +232,17 @@ receive and state changing"
 
 (defparameter *dead-letter* (actor-of *system* (make-instance 'dead-letter :scheduler *pool*)))
 
+(defactor worker
+  (receive (message string) 'default
+           (let ((*standard-output* *stdout*))
+             (format t "Worker: ~A~%" message))))
+
 (defactor actor-1
+  ;;  :scheduler *pool*
   (receive (message string) 'default
            (let ((*standard-output* *stdout*))
              (format t "Actor1: ~A~%" message))
-           (send *system* (get-sender) 1 (get-self))
+           (send (get-self) 1 (get-self))
            (become 'state1))
 
   (receive (message number) 'state1
