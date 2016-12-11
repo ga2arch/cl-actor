@@ -38,7 +38,8 @@
               :initform nil
               :initarg :scheduler)
    (state :accessor state-of
-          :initform (list 'default))))
+          :initform (list 'default))
+   (ref :accessor ref-of)))
 
 (defun make-actor (scheduler)
   (make-instance 'actor :scheduler scheduler))
@@ -70,19 +71,19 @@
 ;; (defmethod initialize-instance :around ((s pool-scheduler) &key)
 ;;   )
 
-(defgeneric insert-actor (system path actor))
+(defgeneric add-actor (system path actor))
 (defgeneric get-actor (system ref))
 (defgeneric actor-of (system actor &key name))
-(defgeneric send (system ref message))
+(defgeneric send (system ref message sender))
 (defgeneric schedule (system scheduler path actor))
 (defgeneric run (actor))
 
 (defgeneric become (actor state))
 (defgeneric unbecome (actor))
-(defgeneric receive (actor message state))
+(defgeneric receive (actor message sender state))
 
-(defmethod insert-actor ((system actor-system) path (actor actor))
-  "Inserts a ref into the system throwing if it already exists"
+(defmethod add-actor ((system actor-system) path (actor actor))
+  "Add a ref into the system throwing if it already exists"
   (with-lock-held ((lock-of system))
     (let* ((actors (get-actors system))
            (key (gethash path actors)))
@@ -127,13 +128,13 @@
                (if (queue-of actor) t nil))))
     (let ((message (pop-queue)))
       (when message
-        (receive actor message (car (state-of actor)))
+        (receive actor (car message) (car (state-of actor))  (cadr message))
         (when (queue-has-elem?)
           (run actor))))))
 
-(defmethod receive ((actor actor) message state)
-  "Dead lettering"
-  (format t "actor: ~A didn't receive message ~A" actor message))
+(defmethod receive ((actor actor) message state sender)
+  (let ((*standard-output* *stdout*))
+    (format t "~A didn't receive message \"~A\" from ~A" actor message sender)))
 
 (defmethod become ((actor actor) (state symbol))
   "Push a new state on the stack"
@@ -159,13 +160,13 @@
            (with-lock-held ((lock-of scheduler))
              (setf (gethash path active) nil))))))))
 
-(defmethod send ((system actor-system) (ref actor-ref) message)
+(defmethod send ((system actor-system) (ref actor-ref) message (sender actor-ref))
   "Send the message to the actor referred by the ref"
   (let ((actor (get-actor system ref)))
     (with-lock-held ((lock-of actor))
       (let* ((queue (queue-of actor))
              (path (get-path ref)))
-        (setf (queue-of actor) (append queue (list message)))
+        (setf (queue-of actor) (append queue (list (list message sender))))
         (schedule system (scheduler-of actor) path actor)))))
 
 (defmethod actor-of ((system actor-system) (actor actor) &key name)
@@ -173,8 +174,10 @@
   (alog.debug "creating actor ~a" name)
   (let* ((path (make-path nil name))
          (ref (make-ref path)))
-     (insert-actor system path actor)
-     ref))
+    (with-lock-held ((lock-of actor))
+      (setf (ref-of actor) ref))
+    (add-actor system path actor)
+    ref))
 
 (defparameter *stdout* *standard-output*)
 (defparameter *system* (make-system))
@@ -183,22 +186,39 @@
 (defmacro defactor (name &body body)
   "Defines a new actor, providing a better primitives for defining
 receive and state changing"
-  `(macrolet ((receive (message state &body body)
-                `(defmethod receive ((this ,',name) ,message (state (eql ,state)))
-                   (flet ((become (state)
-                            (become this state))
-                          (unbecome ()
-                            (unbecome this)))
-                     ,@body))))
-     (progn
-       (defclass ,name (actor)
-         ())
-       ,@body)))
+  (let ((this (gensym))
+        (st (gensym))
+        (sd (gensym)))
+    `(macrolet ((receive (message state &body body)
+                  `(defmethod receive ((,',this ,',name)
+                                       ,message
+                                       (,',st (eql ,state))
+                                       (,',sd actor-ref))
+                     (flet ((become (state)
+                              (become ,',this state))
+                            (unbecome ()
+                              (unbecome ,',this))
+                            (get-self ()
+                              (ref-of ,',this))
+                            (get-sender ()
+                              ,',sd))
+                       ,@body))))
+       (progn
+         (defclass ,name (actor) ())
+         ,@body))))
+
+(defactor dead-letter
+  (receive message 'default
+           (let ((*standard-output* *stdout*))
+             (format t "message: \"~A\" from ~A deadletter" message (get-sender)))))
+
+(defparameter *dead-letter* (actor-of *system* (make-instance 'dead-letter :scheduler *pool*)))
 
 (defactor actor-1
   (receive (message string) 'default
            (let ((*standard-output* *stdout*))
              (format t "Actor1: ~A~%" message))
+           (send *system* (get-sender) 1 (get-self))
            (become 'state1))
 
   (receive (message number) 'state1
@@ -207,5 +227,5 @@ receive and state changing"
              (unbecome))))
 
 (defparameter *ref1* (actor-of *system* (make-instance 'actor-1 :scheduler *pool*)))
-(send *system* *ref1* "prova")
-(send *system* *ref1* 1)
+(send *system* *ref1* "prova" *dead-letter*)
+(send *system* *ref1* 1 *dead-letter*)
