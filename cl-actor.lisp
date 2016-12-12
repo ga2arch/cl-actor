@@ -50,7 +50,7 @@
          :initarg :path)
    (system :accessor system-of
            :initarg :system))
-  (:documentation
+  (:DOCUMENTATION
    "Reference to the real actor through path"))
 
 (defun make-ref (system path)
@@ -75,15 +75,19 @@
 ;;   )
 
 (defgeneric add-actor (system path actor))
+(defgeneric remove-actor (system actor))
 (defgeneric get-actor (system ref))
 (defgeneric actor-of (system actor &key name))
 (defgeneric send (system ref message sender))
 (defgeneric schedule (system scheduler path actor))
 (defgeneric run (actor))
+(defgeneric stop (actor))
 
 (defgeneric become (actor state))
 (defgeneric unbecome (actor))
 (defgeneric receive (actor message sender state))
+
+(defparameter *dead-letter* nil)
 
 (defmethod add-actor ((system actor-system) path (actor actor))
   "Add a ref into the system throwing if it already exists"
@@ -93,6 +97,12 @@
       (if key
           (error 'path-already-exists :text (format nil "path ~A already esists" path))
           (setf (gethash path actors) actor)))))
+
+(defmethod remove-actor ((system actor-system) (actor actor))
+    (with-lock-held ((lock-of system))
+      (setf (gethash (get-path (ref-of actor))
+                     (get-actors system))
+            (get-actor system *dead-letter*))))
 
 (defmethod get-actor ((system actor-system) (ref actor-ref))
   "Returns the actor associated with the ref"
@@ -131,13 +141,22 @@
                (if (queue-of actor) t nil))))
     (let ((message (pop-queue)))
       (when message
-        (receive actor (car message) (car (state-of actor))  (cadr message))
-        (when (queue-has-elem?)
-          (run actor))))))
+        (receive actor (car message) (car (state-of actor)) (cadr message))
+        (if (eql 'dead (car (state-of actor)))
+            (remove-actor (system-of actor) actor)
+            (when (queue-has-elem?)
+              (run actor)))))))
+
+(defmethod stop ((actor actor))
+  (with-lock-held ((lock-of actor))
+    (setf (state-of actor) (list 'dead))))
 
 (defmethod receive ((actor actor) message state sender)
   (let ((*standard-output* *stdout*))
     (format t "~A didn't receive message \"~A\" from ~A" actor message sender)))
+
+(defmethod receive ((actor actor) (message (eql 'poison-pill)) state sender)
+  (stop actor))
 
 (defmethod become ((actor actor) (state symbol))
   "Push a new state on the stack"
@@ -162,6 +181,9 @@
            (run actor)
            (with-lock-held ((lock-of scheduler))
              (setf (gethash path active) nil))))))))
+
+(defmethod send ((system actor-system) (ref actor-ref) message (sender (eql nil)))
+  (send system ref message *dead-letter*))
 
 (defmethod send ((system actor-system) (ref actor-ref) message (sender actor-ref))
   "Send the message to the actor referred by the ref"
@@ -195,16 +217,18 @@
 
 (defun extract-keys (args)
   (let ((body args)
-        (vars)
+        (state)
         (scheduler)
+        (supervisor)
         (on-start)
         (on-stop))
     (loop
        (unless (and body (cdr body)) (return))
-       (print (car body))
        (case (car body)
-         ((:vars)
-          (setf vars (cadr body)))
+         ((:state)
+          (setf state (cadr body)))
+         ((:supervisor)
+          (setf supervisor (cadr body)))
          ((:scheduler)
           (setf scheduler (cadr body)))
          ((:on-start)
@@ -213,20 +237,20 @@
           (setf on-stop (cadr body)))
          (otherwise (return)))
        (setf body (cddr body)))
-    (list vars scheduler on-start on-stop body)))
+    (list state scheduler on-start on-stop body)))
 
 (defparameter *stdout* *standard-output*)
 (defparameter *system* (make-system))
 (defparameter *pool* (make-pool-scheduler 10))
 
-(defmacro defactor (name &rest args)
+(defmacro defactor (name &body args)
   "Defines a new actor, providing a better primitives for defining
 receive and state changing"
-  (destructuring-bind (vars scheduler on-start on-stop body) (extract-keys args)
+  (destructuring-bind (state scheduler on-start on-stop body) (extract-keys args)
     (let ((this (gensym))
           (st (gensym))
           (sd (gensym)))
-      `(let (,@(mapcar #'list vars))
+      `(let (,@(mapcar #'list state))
          (macrolet ((receive (message state &body body)
                       `(defmethod receive ((,',this ,',name)
                                            ,message
@@ -241,10 +265,12 @@ receive and state changing"
                                 (get-sender ()
                                   ,',sd)
                                 (get-system ()
-                                  (system-of ,',this))
-                                (send (to message from)
-                                  (send (system-of ,',this) to message from)))
-                           ,@body))))
+                                  (system-of ,',this)))
+                           (flet ((send (to message from)
+                                    (send (get-system) to message from))
+                                  (stop-self ()
+                                    (send (get-system) (get-self) 'poison-pill (get-self))))
+                            ,@body)))))
            (progn
              (defclass ,name (actor) ())
              (defmethod run ((actor ,name))
@@ -252,6 +278,9 @@ receive and state changing"
                         (actor-of (system-of actor) act)))
                  ,on-start
                  (call-next-method actor)))
+             (defmethod stop ((actor ,name))
+               ,on-stop
+               (call-next-method actor))
              ,@body))))))
 
 (defactor dead-letter
@@ -259,7 +288,7 @@ receive and state changing"
            (let ((*standard-output* *stdout*))
              (format t "message: \"~A\" from ~A deadletter" message (get-sender)))))
 
-(defparameter *dead-letter* (actor-of *system* (make-instance 'dead-letter :scheduler *pool*)))
+(setf *dead-letter* (actor-of *system* (make-instance 'dead-letter :scheduler *pool*)))
 
 (defactor worker
   (receive (message string) 'default
@@ -267,9 +296,14 @@ receive and state changing"
              (format t "Worker: ~A~%" message))))
 
 (defactor actor-1
-  :vars (worker)
+  :state (worker)
+
   :on-start
   (setf worker (actor-of (make-instance 'worker :scheduler *pool*)))
+
+  :on-stop
+  (let ((*standard-output* *stdout*))
+             (format t "Actor1: I'm dead~%"))
 
   (receive (message string) 'default
            (let ((*standard-output* *stdout*))
@@ -281,8 +315,8 @@ receive and state changing"
   (receive (message number) 'state1
            (let ((*standard-output* *stdout*))
              (format t "Actor1: state1 ~A~%" message)
+             (stop-self)
              (unbecome))))
 
 (defparameter *ref1* (actor-of *system* (make-instance 'actor-1 :scheduler *pool*)))
-(send *system* *ref1* "prova" *dead-letter*)
-(send *system* *ref1* 1 *dead-letter*)
+(send *system* *ref1* "prova" nil)
