@@ -20,7 +20,7 @@
   ((actors :accessor get-actors
            :initform (make-hash-table :test 'equal))
    (lock :accessor lock-of
-         :initform (make-recursive-lock "system-lock")))
+         :initform (make-lock "system-lock")))
   (:documentation
      "Holds the actors instances, creates actor refs
      and takes care of delivering the messages to the right actor"))
@@ -32,7 +32,7 @@
 (defclass actor ()
   ((queue :accessor queue-of
           :initform '())
-   (lock :initform (make-recursive-lock "queue-lock")
+   (lock :initform (make-lock "queue-lock")
          :accessor lock-of)
    (scheduler :reader scheduler-of
               :initform nil
@@ -40,7 +40,11 @@
    (state :accessor state-of
           :initform (list 'default))
    (ref :accessor ref-of)
-   (system :accessor system-of)))
+   (system :accessor system-of)
+   (children :accessor children-of
+             :initform nil)
+   (started :accessor started?
+            :initform nil)))
 
 (defun make-actor (scheduler)
   (make-instance 'actor :scheduler scheduler))
@@ -106,7 +110,7 @@
 
 (defmethod get-actor ((system actor-system) (ref actor-ref))
   "Returns the actor associated with the ref"
-  (with-recursive-lock-held ((lock-of system))
+  (with-lock-held ((lock-of system))
     (let* ((actors (get-actors system))
            (actor (gethash (get-path ref) actors)))
       (unless actor
@@ -171,16 +175,17 @@
 
 (defmethod schedule ((system actor-system) (scheduler pool-scheduler) path (actor actor))
   "Schedule the run of the actor on the scheduler"
-  (with-lock-held ((lock-of scheduler))
-    (let* ((active (get-active scheduler))
-           (is-active (gethash path active)))
-      (unless is-active
+  (let ((active))
+    (with-lock-held ((lock-of scheduler))
+      (setf active (get-active scheduler))
+      (unless (gethash path active)
         (setf (gethash path active) t)
-        (make-thread
-         (lambda ()
-           (run actor)
-           (with-lock-held ((lock-of scheduler))
-             (setf (gethash path active) nil))))))))
+        active))
+    (make-thread
+     (lambda ()
+       (run actor)
+       (with-lock-held ((lock-of scheduler))
+         (setf (gethash path active) nil))))))
 
 (defmethod send ((system actor-system) (ref actor-ref) message (sender (eql nil)))
   (send system ref message *dead-letter*))
@@ -189,10 +194,9 @@
   "Send the message to the actor referred by the ref"
   (let ((actor (get-actor system ref)))
     (with-lock-held ((lock-of actor))
-      (let* ((queue (queue-of actor))
-             (path (get-path ref)))
-        (setf (queue-of actor) (append queue (list (list message sender))))
-        (schedule system (scheduler-of actor) path actor)))))
+      (let ((queue (queue-of actor)))
+        (setf (queue-of actor) (append queue (list (list message sender))))))
+    (schedule system (scheduler-of actor) (get-path ref) actor)))
 
 (defmethod actor-of ((system actor-system) (actor-name symbol) &rest args)
   "Create an actor ref for the actor passed and inserts it into the system"
@@ -209,11 +213,15 @@
   "Create an actor ref for the actor passed and inserts it into the system"
   (let* ((actor (apply #'make-instance (cons actor-name args)))
          (system (system-of parent))
+         (parent-actor (get-actor system parent))
          (path (make-path (get-path parent) nil))
          (ref (make-ref system path)))
     (with-lock-held ((lock-of actor))
       (setf (ref-of actor) ref)
       (setf (system-of actor) system))
+    (with-lock-held ((lock-of parent-actor))
+      (let ((children (children-of parent-actor)))
+        (setf (children-of parent-actor) (cons ref children))))
     (add-actor system path actor)
     ref))
 
@@ -277,8 +285,16 @@ receive and state changing"
              (defclass ,name (actor) ())
              (defmethod run ((actor ,name))
                (flet ((actor-of (act &rest args)
-                        (apply #'actor-of (append (list (system-of actor) act) args))))
-                 ,on-start
+                        (apply #'actor-of (append (list (ref-of actor) act) args))))
+
+                 (let ((started (with-lock-held ((lock-of actor))
+                                   (if (started? actor)
+                                       t
+                                       (progn
+                                         (setf (started? actor) t)
+                                         nil)))))
+                   (unless started
+                     ,on-start))
                  (call-next-method actor)))
              (defmethod stop ((actor ,name))
                ,on-stop
@@ -310,14 +326,14 @@ receive and state changing"
   (receive (message string) 'default
            (let ((*standard-output* *stdout*))
              (format t "Actor1: ~A~%" message))
-           (send (get-self) 1 (get-self))
            (send worker "lol" (get-self))
-           (become 'state1))
+           (become 'state1)
+           (send (get-self) 1 (get-self)))
 
   (receive (message number) 'state1
            (let ((*standard-output* *stdout*))
              (format t "Actor1: state1 ~A~%" message)
-             (stop-self)
+             ;;(stop-self)
              (unbecome))))
 
 (defparameter *ref1* (actor-of *system* 'actor-1 :scheduler *pool*))
